@@ -1,0 +1,27 @@
+# Binaries
+cozy
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Don't publish books on github
+test_data
+test_data/*
+
+# Agent files
+CLAUDE.md
+AGENTS.md

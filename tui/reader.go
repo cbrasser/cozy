@@ -1,0 +1,273 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/cbrasser/cozy/config"
+	"github.com/cbrasser/cozy/ebook"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
+)
+
+// readerKeyMap defines key bindings for the reader
+type readerKeyMap struct {
+	NextChapter  key.Binding
+	PrevChapter  key.Binding
+	FirstChapter key.Binding
+	LastChapter  key.Binding
+	ScrollUp     key.Binding
+	ScrollDown   key.Binding
+	Back         key.Binding
+	Quit         key.Binding
+	ToggleHelp   key.Binding
+}
+
+func (k readerKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.NextChapter, k.PrevChapter, k.ScrollUp, k.ScrollDown, k.Back, k.Quit}
+}
+
+func (k readerKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.NextChapter, k.PrevChapter, k.FirstChapter, k.LastChapter},
+		{k.ScrollUp, k.ScrollDown, k.Back, k.Quit},
+		{k.ToggleHelp},
+	}
+}
+
+var readerKeys = readerKeyMap{
+	NextChapter: key.NewBinding(
+		key.WithKeys("right", "n", "pgdown"),
+		key.WithHelp("→/n", "next chapter"),
+	),
+	PrevChapter: key.NewBinding(
+		key.WithKeys("left", "p", "pgup"),
+		key.WithHelp("←/p", "previous chapter"),
+	),
+	FirstChapter: key.NewBinding(
+		key.WithKeys("home"),
+		key.WithHelp("home", "first chapter"),
+	),
+	LastChapter: key.NewBinding(
+		key.WithKeys("end"),
+		key.WithHelp("end", "last chapter"),
+	),
+	ScrollUp: key.NewBinding(
+		key.WithKeys("up", "k"),
+		key.WithHelp("↑/k", "scroll up"),
+	),
+	ScrollDown: key.NewBinding(
+		key.WithKeys("down", "j", " "),
+		key.WithHelp("↓/j/space", "scroll down"),
+	),
+	Back: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "back to library"),
+	),
+	Quit: key.NewBinding(
+		key.WithKeys("q", "ctrl+c"),
+		key.WithHelp("q", "quit"),
+	),
+	ToggleHelp: key.NewBinding(
+		key.WithKeys("?"),
+		key.WithHelp("?", "toggle help"),
+	),
+}
+
+// ReaderModel represents the book reader view
+type ReaderModel struct {
+	config         *config.Config
+	book           *ebook.Book
+	viewport       viewport.Model
+	help           help.Model
+	keys           readerKeyMap
+	currentChapter int
+	width          int
+	height         int
+}
+
+// NewReaderModel creates a new reader model
+func NewReaderModel(cfg *config.Config) *ReaderModel {
+	vp := viewport.New(0, 0)
+	h := help.New()
+	return &ReaderModel{
+		config:   cfg,
+		viewport: vp,
+		help:     h,
+		keys:     readerKeys,
+	}
+}
+
+// Init initializes the reader model
+func (m *ReaderModel) Init() tea.Cmd {
+	return nil
+}
+
+// LoadBook loads a book into the reader
+func (m *ReaderModel) LoadBook(book *ebook.Book) {
+	m.book = book
+	m.currentChapter = 0
+	m.updateViewport()
+}
+
+// SetSize updates the size of the reader view
+func (m *ReaderModel) SetSize(width, height int) {
+	m.width = width
+	m.height = height
+	m.help.Width = width
+	m.viewport.Width = width - m.config.Display.MarginLeft - m.config.Display.MarginRight
+	m.viewport.Height = height - 6 // Account for header and footer
+	m.updateViewport()
+}
+
+// updateViewport updates the viewport with the current chapter content
+func (m *ReaderModel) updateViewport() {
+	if m.book == nil || m.config.ActiveTheme == nil {
+		return
+	}
+
+	chapter := m.book.GetChapter(m.currentChapter)
+	if chapter == nil {
+		return
+	}
+
+	// Use viewport width for rendering
+	renderWidth := m.viewport.Width
+	if renderWidth <= 0 {
+		renderWidth = 80 // Default width
+	}
+
+	// Render HTML to styled text based on book format
+	var renderedContent string
+	if m.book.Format == ebook.FormatEPUB {
+		// EPUB: render HTML with rich formatting
+		renderedContent = ebook.RenderToStyledText(chapter.Content, m.config.ActiveTheme, renderWidth)
+	} else {
+		// Plain text: just wrap it
+		renderedContent = wordwrap.String(chapter.Content, renderWidth)
+	}
+
+	m.viewport.SetContent(renderedContent)
+	m.viewport.GotoTop()
+}
+
+// Update handles messages for the reader view
+func (m *ReaderModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.book == nil {
+		return m, nil
+	}
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, m.keys.ToggleHelp):
+			m.help.ShowAll = !m.help.ShowAll
+			return m, nil
+
+		case key.Matches(msg, m.keys.Back):
+			// Save reading progress
+			m.config.Reading.CurrentBook = m.book.Path
+			m.config.Reading.Position = m.currentChapter
+			config.Save(m.config)
+			return m, func() tea.Msg { return BackToLibraryMsg{} }
+
+		case key.Matches(msg, m.keys.NextChapter):
+			// Next chapter
+			if m.currentChapter < m.book.ChapterCount()-1 {
+				m.currentChapter++
+				m.updateViewport()
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.PrevChapter):
+			// Previous chapter
+			if m.currentChapter > 0 {
+				m.currentChapter--
+				m.updateViewport()
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.FirstChapter):
+			// First chapter
+			m.currentChapter = 0
+			m.updateViewport()
+			return m, nil
+
+		case key.Matches(msg, m.keys.LastChapter):
+			// Last chapter
+			m.currentChapter = m.book.ChapterCount() - 1
+			m.updateViewport()
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+// View renders the reader view
+func (m *ReaderModel) View() string {
+	if m.book == nil || m.config.ActiveTheme == nil {
+		return "No book loaded"
+	}
+
+	theme := m.config.ActiveTheme
+
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color(theme.PrimaryColor)).
+		Padding(0, 1)
+
+	chapterTitleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(theme.SecondaryColor)).
+		Italic(true).
+		Padding(0, 1)
+
+	progressStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(theme.SecondaryColor)).
+		Padding(0, 1)
+
+	// Header with book title
+	title := m.book.Title
+	if m.book.Author != "" {
+		title = fmt.Sprintf("%s - %s", m.book.Title, m.book.Author)
+	}
+	header := headerStyle.Render(title)
+
+	// Chapter title
+	chapter := m.book.GetChapter(m.currentChapter)
+	chapterTitle := ""
+	if chapter != nil {
+		chapterTitle = chapterTitleStyle.Render(fmt.Sprintf("Chapter %d/%d: %s",
+			m.currentChapter+1,
+			m.book.ChapterCount(),
+			chapter.Title))
+	}
+
+	// Progress indicator
+	progress := fmt.Sprintf("Chapter %d/%d • Scroll: %.0f%%",
+		m.currentChapter+1,
+		m.book.ChapterCount(),
+		m.viewport.ScrollPercent()*100,
+	)
+
+	// Help view
+	helpView := m.help.View(m.keys)
+
+	// Combine header, viewport, and footer
+	return lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		chapterTitle,
+		strings.Repeat("─", m.width),
+		m.viewport.View(),
+		strings.Repeat("─", m.width),
+		progressStyle.Render(progress),
+		helpView,
+	)
+}
