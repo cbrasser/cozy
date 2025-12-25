@@ -16,37 +16,49 @@ import (
 
 // readerKeyMap defines key bindings for the reader
 type readerKeyMap struct {
-	NextChapter  key.Binding
-	PrevChapter  key.Binding
-	FirstChapter key.Binding
-	LastChapter  key.Binding
-	ScrollUp     key.Binding
-	ScrollDown   key.Binding
-	Back         key.Binding
-	Quit         key.Binding
-	ToggleHelp   key.Binding
+	NextChapter     key.Binding
+	PrevChapter     key.Binding
+	NextHeading     key.Binding
+	PrevHeading     key.Binding
+	FirstChapter    key.Binding
+	LastChapter     key.Binding
+	ScrollUp        key.Binding
+	ScrollDown      key.Binding
+	HalfPageUp      key.Binding
+	HalfPageDown    key.Binding
+	Back            key.Binding
+	Quit            key.Binding
+	ToggleHelp      key.Binding
 }
 
 func (k readerKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.NextChapter, k.PrevChapter, k.ScrollUp, k.ScrollDown, k.Back, k.Quit}
+	return []key.Binding{k.NextChapter, k.PrevChapter, k.NextHeading, k.PrevHeading, k.ScrollUp, k.ScrollDown, k.Back, k.Quit}
 }
 
 func (k readerKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.NextChapter, k.PrevChapter, k.FirstChapter, k.LastChapter},
-		{k.ScrollUp, k.ScrollDown, k.Back, k.Quit},
+		{k.NextChapter, k.PrevChapter, k.NextHeading, k.PrevHeading, k.FirstChapter, k.LastChapter},
+		{k.ScrollUp, k.ScrollDown, k.HalfPageUp, k.HalfPageDown, k.Back, k.Quit},
 		{k.ToggleHelp},
 	}
 }
 
 var readerKeys = readerKeyMap{
 	NextChapter: key.NewBinding(
-		key.WithKeys("right", "n", "pgdown"),
-		key.WithHelp("→/n", "next chapter"),
+		key.WithKeys("l", "right", "n", "pgdown"),
+		key.WithHelp("l/→/n", "next chapter"),
 	),
 	PrevChapter: key.NewBinding(
-		key.WithKeys("left", "p", "pgup"),
-		key.WithHelp("←/p", "previous chapter"),
+		key.WithKeys("h", "left", "p", "pgup"),
+		key.WithHelp("h/←/p", "previous chapter"),
+	),
+	NextHeading: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "next section"),
+	),
+	PrevHeading: key.NewBinding(
+		key.WithKeys("S"),
+		key.WithHelp("S", "previous section"),
 	),
 	FirstChapter: key.NewBinding(
 		key.WithKeys("home"),
@@ -64,6 +76,14 @@ var readerKeys = readerKeyMap{
 		key.WithKeys("down", "j", " "),
 		key.WithHelp("↓/j/space", "scroll down"),
 	),
+	HalfPageUp: key.NewBinding(
+		key.WithKeys("K"),
+		key.WithHelp("K", "half page up"),
+	),
+	HalfPageDown: key.NewBinding(
+		key.WithKeys("J"),
+		key.WithHelp("J", "half page down"),
+	),
 	Back: key.NewBinding(
 		key.WithKeys("esc"),
 		key.WithHelp("esc", "back to library"),
@@ -80,25 +100,38 @@ var readerKeys = readerKeyMap{
 
 // ReaderModel represents the book reader view
 type ReaderModel struct {
-	config         *config.Config
-	book           *ebook.Book
-	viewport       viewport.Model
-	help           help.Model
-	keys           readerKeyMap
-	currentChapter int
-	width          int
-	height         int
+	config           *config.Config
+	book             *ebook.Book
+	viewport         viewport.Model
+	help             help.Model
+	keys             readerKeyMap
+	currentChapter   int
+	headingPositions []int // Line numbers of H2/H3 headings in current chapter
+	progress         *config.ProgressData
+	width            int
+	height           int
 }
 
 // NewReaderModel creates a new reader model
 func NewReaderModel(cfg *config.Config) *ReaderModel {
 	vp := viewport.New(0, 0)
 	h := help.New()
+
+	// Load reading progress
+	progress, err := config.LoadProgress(cfg)
+	if err != nil {
+		// If loading fails, create empty progress
+		progress = &config.ProgressData{
+			Books: make(map[string]config.BookProgress),
+		}
+	}
+
 	return &ReaderModel{
 		config:   cfg,
 		viewport: vp,
 		help:     h,
 		keys:     readerKeys,
+		progress: progress,
 	}
 }
 
@@ -107,11 +140,33 @@ func (m *ReaderModel) Init() tea.Cmd {
 	return nil
 }
 
+// SaveProgress saves the current reading position
+func (m *ReaderModel) SaveProgress() {
+	if m.book != nil {
+		m.progress.SetBookProgress(m.book.Path, m.currentChapter, m.viewport.YOffset)
+		config.SaveProgress(m.config, m.progress)
+	}
+}
+
 // LoadBook loads a book into the reader
 func (m *ReaderModel) LoadBook(book *ebook.Book) {
 	m.book = book
-	m.currentChapter = 0
-	m.updateViewport()
+
+	// Try to restore saved progress for this book
+	if savedProgress, exists := m.progress.GetBookProgress(book.Path); exists {
+		m.currentChapter = savedProgress.CurrentChapter
+		// Ensure chapter is valid
+		if m.currentChapter >= book.ChapterCount() {
+			m.currentChapter = 0
+		}
+		m.updateViewport()
+		// Restore scroll position
+		m.viewport.SetYOffset(savedProgress.ScrollOffset)
+	} else {
+		// No saved progress, start from beginning
+		m.currentChapter = 0
+		m.updateViewport()
+	}
 }
 
 // SetSize updates the size of the reader view
@@ -144,11 +199,14 @@ func (m *ReaderModel) updateViewport() {
 	// Render HTML to styled text based on book format
 	var renderedContent string
 	if m.book.Format == ebook.FormatEPUB {
-		// EPUB: render HTML with rich formatting
-		renderedContent = ebook.RenderToStyledText(chapter.Content, m.config.ActiveTheme, renderWidth)
+		// EPUB: render HTML with rich formatting and track heading positions
+		renderResult := ebook.RenderToStyledTextWithHeadings(chapter.Content, m.config.ActiveTheme, renderWidth)
+		renderedContent = renderResult.Text
+		m.headingPositions = renderResult.HeadingPositions
 	} else {
 		// Plain text: just wrap it
 		renderedContent = wordwrap.String(chapter.Content, renderWidth)
+		m.headingPositions = []int{}
 	}
 
 	m.viewport.SetContent(renderedContent)
@@ -170,9 +228,7 @@ func (m *ReaderModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Back):
 			// Save reading progress
-			m.config.Reading.CurrentBook = m.book.Path
-			m.config.Reading.Position = m.currentChapter
-			config.Save(m.config)
+			m.SaveProgress()
 			return m, func() tea.Msg { return BackToLibraryMsg{} }
 
 		case key.Matches(msg, m.keys.NextChapter):
@@ -181,6 +237,71 @@ func (m *ReaderModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentChapter++
 				m.updateViewport()
 			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.NextHeading):
+			// Jump to next heading (H2/H3) within the current chapter
+			currentLine := m.viewport.YOffset
+
+			// Find the next heading after the current position
+			nextHeadingLine := -1
+			for _, headingLine := range m.headingPositions {
+				if headingLine > currentLine {
+					nextHeadingLine = headingLine
+					break
+				}
+			}
+
+			if nextHeadingLine >= 0 {
+				// Jump to the heading within the current chapter
+				m.viewport.SetYOffset(nextHeadingLine)
+			} else {
+				// No more headings in this chapter, go to next chapter
+				if m.currentChapter < m.book.ChapterCount()-1 {
+					m.currentChapter++
+					m.updateViewport()
+				}
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.PrevHeading):
+			// Jump to previous heading (H2/H3) within the current chapter
+			currentLine := m.viewport.YOffset
+
+			// Find the previous heading before the current position
+			prevHeadingLine := -1
+			for i := len(m.headingPositions) - 1; i >= 0; i-- {
+				headingLine := m.headingPositions[i]
+				if headingLine < currentLine {
+					prevHeadingLine = headingLine
+					break
+				}
+			}
+
+			if prevHeadingLine >= 0 {
+				// Jump to the heading within the current chapter
+				m.viewport.SetYOffset(prevHeadingLine)
+			} else {
+				// No more headings before this in the chapter, go to previous chapter
+				if m.currentChapter > 0 {
+					m.currentChapter--
+					m.updateViewport()
+					// Go to the last heading in the previous chapter
+					if len(m.headingPositions) > 0 {
+						m.viewport.SetYOffset(m.headingPositions[len(m.headingPositions)-1])
+					}
+				}
+			}
+			return m, nil
+
+		case key.Matches(msg, m.keys.HalfPageDown):
+			// Scroll down half a viewport
+			m.viewport.HalfViewDown()
+			return m, nil
+
+		case key.Matches(msg, m.keys.HalfPageUp):
+			// Scroll up half a viewport
+			m.viewport.HalfViewUp()
 			return m, nil
 
 		case key.Matches(msg, m.keys.PrevChapter):

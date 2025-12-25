@@ -53,6 +53,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
+			// Save reading progress before quitting
+			if m.currentView == ViewReader {
+				m.reader.SaveProgress()
+			}
 			return m, tea.Quit
 		}
 

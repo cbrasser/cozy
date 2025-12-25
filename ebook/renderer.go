@@ -9,17 +9,25 @@ import (
 	"golang.org/x/net/html"
 )
 
+// RenderResult contains the rendered text and metadata
+type RenderResult struct {
+	Text            string
+	HeadingPositions []int // Line numbers where H2/H3 headings start
+}
+
 // Renderer converts HTML to styled terminal text
 type Renderer struct {
-	theme *config.Theme
-	width int
+	theme            *config.Theme
+	width            int
+	headingPositions []int
 }
 
 // NewRenderer creates a new HTML renderer
 func NewRenderer(theme *config.Theme, width int) *Renderer {
 	return &Renderer{
-		theme: theme,
-		width: width,
+		theme:            theme,
+		width:            width,
+		headingPositions: []int{},
 	}
 }
 
@@ -37,6 +45,30 @@ func (r *Renderer) Render(htmlContent string) string {
 	return strings.TrimSpace(result.String())
 }
 
+// RenderWithHeadings converts HTML to styled text and returns heading positions
+func (r *Renderer) RenderWithHeadings(htmlContent string) RenderResult {
+	r.headingPositions = []int{} // Reset heading positions
+
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		// Fallback to simple text stripping
+		return RenderResult{
+			Text:            htmlToText(htmlContent),
+			HeadingPositions: []int{},
+		}
+	}
+
+	var result strings.Builder
+	r.renderNode(doc, &result, &renderContext{})
+
+	text := strings.TrimSpace(result.String())
+
+	return RenderResult{
+		Text:            text,
+		HeadingPositions: r.headingPositions,
+	}
+}
+
 // renderContext tracks the current rendering state
 type renderContext struct {
 	inHeading    int  // 0 = none, 1-6 = h1-h6
@@ -46,6 +78,7 @@ type renderContext struct {
 	inEmphasis   bool
 	inStrong     bool
 	listLevel    int
+	inListItem   bool // true when inside a <li> element
 }
 
 // clone creates a copy of the context
@@ -88,6 +121,14 @@ func (r *Renderer) renderElement(n *html.Node, out *strings.Builder, ctx *render
 	switch n.Data {
 	case "h1", "h2", "h3", "h4", "h5", "h6":
 		out.WriteString("\n\n")
+
+		// Record position of H2 and H3 headings
+		if n.Data == "h2" || n.Data == "h3" {
+			currentText := out.String()
+			lineCount := strings.Count(currentText, "\n")
+			r.headingPositions = append(r.headingPositions, lineCount)
+		}
+
 		switch n.Data {
 		case "h1":
 			newCtx.inHeading = 1
@@ -104,7 +145,10 @@ func (r *Renderer) renderElement(n *html.Node, out *strings.Builder, ctx *render
 		}
 
 	case "p":
-		out.WriteString("\n\n")
+		// Don't add extra newlines for paragraphs inside list items
+		if !ctx.inListItem {
+			out.WriteString("\n\n")
+		}
 
 	case "blockquote":
 		out.WriteString("\n\n")
@@ -144,6 +188,7 @@ func (r *Renderer) renderElement(n *html.Node, out *strings.Builder, ctx *render
 	case "li":
 		indent := strings.Repeat("  ", ctx.listLevel-1)
 		out.WriteString("\n" + indent + "• ")
+		newCtx.inListItem = true
 
 	case "div", "span", "a":
 		// Pass through, just render children
@@ -181,10 +226,6 @@ func (r *Renderer) writeStyledText(out *strings.Builder, text string, ctx *rende
 			Foreground(lipgloss.Color(r.theme.HeadingColor)).
 			Bold(true)
 
-		if ctx.inHeading == 1 {
-			style = style.Underline(true)
-		}
-
 		// Add heading prefix
 		prefix := strings.Repeat("#", ctx.inHeading) + " "
 		text = prefix + text
@@ -197,7 +238,7 @@ func (r *Renderer) writeStyledText(out *strings.Builder, text string, ctx *rende
 		// Wrap text before styling (account for border + padding = 4 chars)
 		wrappedText := wordwrap.String(text, max(effectiveWidth-4, 40))
 
-		// Format blockquote with left border
+		// Format blockquote with left border and faded text
 		lines := strings.Split(wrappedText, "\n")
 		for i, line := range lines {
 			if strings.TrimSpace(line) == "" {
@@ -205,7 +246,7 @@ func (r *Renderer) writeStyledText(out *strings.Builder, text string, ctx *rende
 			}
 
 			quoteStyle := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(r.theme.QuoteColor)).
+				Foreground(lipgloss.Color(r.theme.MutedTextColor)).
 				Italic(true).
 				BorderLeft(true).
 				BorderStyle(lipgloss.ThickBorder()).
@@ -235,6 +276,11 @@ func (r *Renderer) writeStyledText(out *strings.Builder, text string, ctx *rende
 	} else {
 		// Wrap regular text
 		text = wordwrap.String(text, effectiveWidth)
+
+		// Justify wrapped text (except for headings)
+		if ctx.inHeading == 0 && len(strings.TrimSpace(text)) > 0 {
+			text = justifyText(text, effectiveWidth)
+		}
 
 		// Apply inline formatting
 		if ctx.inEmphasis {
@@ -273,11 +319,97 @@ func RenderToStyledText(htmlContent string, theme *config.Theme, width int) stri
 	return result
 }
 
+// RenderToStyledTextWithHeadings renders HTML and returns heading positions
+func RenderToStyledTextWithHeadings(htmlContent string, theme *config.Theme, width int) RenderResult {
+	renderer := NewRenderer(theme, width)
+	result := renderer.RenderWithHeadings(htmlContent)
+
+	// If rendering produced no output, fall back to simple text extraction
+	if strings.TrimSpace(result.Text) == "" {
+		return RenderResult{
+			Text:            htmlToText(htmlContent),
+			HeadingPositions: []int{},
+		}
+	}
+
+	return result
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
+}
+
+// justifyText takes wrapped text and justifies it to the given width
+// The last line of the text is left-aligned (not justified)
+func justifyText(text string, width int) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return text
+	}
+
+	var justified []string
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			justified = append(justified, "")
+			continue
+		}
+
+		isLastLine := (i == len(lines)-1)
+		words := strings.Fields(line)
+
+		// Don't justify if:
+		// 1. It's the last line of the paragraph
+		// 2. It's a single-line paragraph (only one line total)
+		// 3. It has only one word
+		// 4. The line is significantly shorter than width (likely already a last line)
+		lineLen := len(line)
+		if isLastLine || len(lines) == 1 || len(words) <= 1 || lineLen < int(float64(width)*0.75) {
+			justified = append(justified, line)
+			continue
+		}
+
+		// Calculate total word length
+		wordLen := 0
+		for _, word := range words {
+			wordLen += len(word)
+		}
+
+		// Calculate how many spaces we need to distribute
+		totalSpaces := width - wordLen
+		gaps := len(words) - 1
+
+		if gaps <= 0 || totalSpaces < gaps {
+			// Not enough space to justify, return as-is
+			justified = append(justified, line)
+			continue
+		}
+
+		// Distribute spaces evenly
+		spacesPerGap := totalSpaces / gaps
+		extraSpaces := totalSpaces % gaps
+
+		var justifiedLine strings.Builder
+		for i, word := range words {
+			justifiedLine.WriteString(word)
+			if i < len(words)-1 {
+				// Add base spaces
+				justifiedLine.WriteString(strings.Repeat(" ", spacesPerGap))
+				// Add extra space to first few gaps
+				if i < extraSpaces {
+					justifiedLine.WriteString(" ")
+				}
+			}
+		}
+
+		justified = append(justified, justifiedLine.String())
+	}
+
+	return strings.Join(justified, "\n")
 }
 
 // Debug helper - simple text extraction for testing

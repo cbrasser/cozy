@@ -9,10 +9,12 @@ import (
 )
 
 type Config struct {
-	Library   LibraryConfig `toml:"library"`
-	ThemeName string        `toml:"theme_name"` // Name of theme to load
-	Reading   ReadingConfig `toml:"reading"`
-	Display   DisplayConfig `toml:"display"`
+	Library          LibraryConfig `toml:"library"`
+	ThemeName        string        `toml:"theme_name"` // Name of theme to load
+	Reading          ReadingConfig `toml:"reading"`
+	Display          DisplayConfig `toml:"display"`
+	DataDir          string        `toml:"data_dir"`           // Directory for app data (bookmarks, progress, etc.)
+	UseLibraryForData bool          `toml:"use_library_for_data"` // If true, store data in library path
 
 	// Active theme (loaded at runtime, not saved to file)
 	ActiveTheme *Theme `toml:"-"`
@@ -42,12 +44,15 @@ func DefaultConfig() Config {
 	}
 
 	defaultTheme := CozyDark
+	configDir := filepath.Join(homeDir, ".config", "cozy")
 
 	return Config{
 		Library: LibraryConfig{
 			Path: filepath.Join(homeDir, "Documents", "Books"),
 		},
-		ThemeName: "cozy-dark",
+		ThemeName:        "cozy-dark",
+		DataDir:          filepath.Join(configDir, "data"),
+		UseLibraryForData: false,
 		Reading: ReadingConfig{
 			CurrentBook: "",
 			Position:    0,
@@ -81,6 +86,25 @@ func ConfigPath() (string, error) {
 	}
 
 	return filepath.Join(configDir, "config.toml"), nil
+}
+
+// DataDir returns the path to the data directory based on config
+func (c *Config) DataDirectory() string {
+	if c.UseLibraryForData {
+		// Use hidden folder in library path
+		return filepath.Join(c.Library.Path, ".cozy")
+	}
+	// Use configured data directory (defaults to ~/.config/cozy/data)
+	return c.DataDir
+}
+
+// EnsureDataDir creates the data directory if it doesn't exist
+func (c *Config) EnsureDataDir() error {
+	dataDir := c.DataDirectory()
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to create data directory: %w", err)
+	}
+	return nil
 }
 
 // Load loads the config from the config file, creating a default one if it doesn't exist
