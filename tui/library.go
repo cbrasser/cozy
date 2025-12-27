@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/cbrasser/cozy/config"
 	"github.com/cbrasser/cozy/ebook"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -12,21 +14,55 @@ import (
 
 // LibraryModel represents the library view
 type LibraryModel struct {
-	config    *config.Config
-	list      list.Model
-	bookPaths []string
-	width     int
-	height    int
+	config   *config.Config
+	list     list.Model
+	books    []ebook.BookInfo
+	progress *config.ProgressData
+	width    int
+	height   int
 }
 
 type bookItem struct {
-	title string
-	path  string
+	title      string
+	author     string
+	path       string
+	tags       []string
+	completion float64
+	finished   bool
 }
 
-func (i bookItem) Title() string       { return i.title }
-func (i bookItem) Description() string { return i.path }
-func (i bookItem) FilterValue() string { return i.title }
+func (i bookItem) Title() string { return i.title }
+func (i bookItem) Description() string {
+	parts := []string{}
+
+	if len(i.tags) > 0 {
+		parts = append(parts, "📁 "+strings.Join(i.tags, " / "))
+	}
+
+	if i.author != "" {
+		parts = append(parts, i.author)
+	}
+
+	// Add completion percentage or finished status
+	if i.finished {
+		parts = append(parts, "✓ Finished")
+	} else if i.completion > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f%%", i.completion))
+	}
+
+	return strings.Join(parts, " • ")
+}
+func (i bookItem) FilterValue() string {
+	// Allow filtering by title, author, and tags
+	filterValue := i.title
+	if i.author != "" {
+		filterValue += " " + i.author
+	}
+	if len(i.tags) > 0 {
+		filterValue += " " + strings.Join(i.tags, " ")
+	}
+	return filterValue
+}
 
 // NewLibraryModel creates a new library model
 func NewLibraryModel(cfg *config.Config) *LibraryModel {
@@ -38,9 +74,29 @@ func NewLibraryModel(cfg *config.Config) *LibraryModel {
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 
+	// Add custom help text for the 'f' key
+	l.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(
+				key.WithKeys("f"),
+				key.WithHelp("f", "toggle finished"),
+			),
+		}
+	}
+
+	// Load progress data
+	progress, err := config.LoadProgress(cfg)
+	if err != nil {
+		// If loading fails, create empty progress
+		progress = &config.ProgressData{
+			Books: make(map[string]config.BookProgress),
+		}
+	}
+
 	return &LibraryModel{
-		config: cfg,
-		list:   l,
+		config:   cfg,
+		list:     l,
+		progress: progress,
 	}
 }
 
@@ -75,22 +131,33 @@ func (m *LibraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.bookPaths = msg.Books
+		m.books = msg.Books
 		items := make([]list.Item, len(msg.Books))
-		for i, path := range msg.Books {
-			// Try to load book metadata
-			book, err := ebook.Open(path)
-			title := path
-			if err == nil && book.Title != "" {
-				title = book.Title
-				if book.Author != "" {
-					title = fmt.Sprintf("%s - %s", book.Title, book.Author)
-				}
+		for i, bookInfo := range msg.Books {
+			title := bookInfo.Path
+			author := ""
+			if bookInfo.Title != "" {
+				title = bookInfo.Title
+			}
+			if bookInfo.Author != "" {
+				author = bookInfo.Author
+			}
+
+			// Get progress data for this book
+			completion := 0.0
+			finished := false
+			if bookProgress, exists := m.progress.GetBookProgress(bookInfo.Path); exists {
+				completion = bookProgress.GetCompletionPercentage()
+				finished = bookProgress.Finished
 			}
 
 			items[i] = bookItem{
-				title: title,
-				path:  path,
+				title:      title,
+				author:     author,
+				path:       bookInfo.Path,
+				tags:       bookInfo.Tags,
+				completion: completion,
+				finished:   finished,
 			}
 		}
 		m.list.SetItems(items)
@@ -102,6 +169,14 @@ func (m *LibraryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Load the selected book
 			if i, ok := m.list.SelectedItem().(bookItem); ok {
 				return m, m.openBook(i.path)
+			}
+		case "f":
+			// Toggle finished status for the selected book
+			if i, ok := m.list.SelectedItem().(bookItem); ok {
+				m.progress.SetBookFinished(i.path, !i.finished)
+				config.SaveProgress(m.config, m.progress)
+				// Reload the list to reflect changes
+				return m, m.loadBooks()
 			}
 		}
 	}
@@ -135,18 +210,12 @@ func (m *LibraryModel) View() string {
 		Foreground(lipgloss.Color(theme.PrimaryColor)).
 		Padding(1, 0)
 
-	helpStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(theme.SecondaryColor)).
-		Padding(1, 0)
-
-	help := helpStyle.Render("↑/↓: navigate • enter: open book • /: search • q: quit")
-
-	return titleStyle.Render("Cozy - E-Book Reader") + "\n" + m.list.View() + "\n" + help
+	return titleStyle.Render("Cozy - E-Book Reader") + "\n" + m.list.View()
 }
 
 // Messages
 type BooksLoadedMsg struct {
-	Books []string
+	Books []ebook.BookInfo
 	Error error
 }
 

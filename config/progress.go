@@ -12,6 +12,8 @@ type BookProgress struct {
 	BookPath       string `json:"book_path"`
 	CurrentChapter int    `json:"current_chapter"`
 	ScrollOffset   int    `json:"scroll_offset"` // Viewport Y offset within chapter
+	TotalChapters  int    `json:"total_chapters"`
+	Finished       bool   `json:"finished"`
 }
 
 // ProgressData stores all reading progress
@@ -78,10 +80,29 @@ func (p *ProgressData) GetBookProgress(bookPath string) (BookProgress, bool) {
 }
 
 // SetBookProgress updates progress for a specific book
-func (p *ProgressData) SetBookProgress(bookPath string, chapter, offset int) {
+func (p *ProgressData) SetBookProgress(bookPath string, chapter, offset, totalChapters int) {
+	existing := p.Books[bookPath]
 	p.Books[bookPath] = BookProgress{
 		BookPath:       bookPath,
 		CurrentChapter: chapter,
 		ScrollOffset:   offset,
+		TotalChapters:  totalChapters,
+		Finished:       existing.Finished, // Preserve finished status
 	}
+}
+
+// SetBookFinished marks a book as finished or unfinished
+func (p *ProgressData) SetBookFinished(bookPath string, finished bool) {
+	existing := p.Books[bookPath]
+	existing.Finished = finished
+	p.Books[bookPath] = existing
+}
+
+// GetCompletionPercentage calculates completion percentage for a book
+func (bp BookProgress) GetCompletionPercentage() float64 {
+	if bp.TotalChapters == 0 {
+		return 0
+	}
+	// Calculate based on chapter completion
+	return (float64(bp.CurrentChapter) / float64(bp.TotalChapters)) * 100
 }

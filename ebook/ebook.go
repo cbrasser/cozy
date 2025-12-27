@@ -22,6 +22,7 @@ type Book struct {
 	Format   Format
 	Chapters []Chapter          // Book chapters
 	Metadata map[string]string
+	Tags     []string           // Folder names as tags (relative to library root)
 }
 
 // Format represents the e-book format
@@ -35,6 +36,14 @@ const (
 // Reader interface for different e-book formats
 type Reader interface {
 	Read(path string) (*Book, error)
+}
+
+// BookInfo holds basic information about a book for library display
+type BookInfo struct {
+	Path   string
+	Title  string
+	Author string
+	Tags   []string
 }
 
 // Open opens an e-book file and returns a Book
@@ -67,8 +76,8 @@ func Open(path string) (*Book, error) {
 }
 
 // ListBooks lists all supported e-books in a directory
-func ListBooks(dir string) ([]string, error) {
-	var books []string
+func ListBooks(dir string) ([]BookInfo, error) {
+	var books []BookInfo
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -81,7 +90,22 @@ func ListBooks(dir string) ([]string, error) {
 
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".epub" || ext == ".txt" {
-			books = append(books, path)
+			// Extract tags from folder path relative to library root
+			tags := extractTags(path, dir)
+
+			// Try to get book metadata
+			bookInfo := BookInfo{
+				Path: path,
+				Tags: tags,
+			}
+
+			// Attempt to load title and author
+			if book, err := Open(path); err == nil {
+				bookInfo.Title = book.Title
+				bookInfo.Author = book.Author
+			}
+
+			books = append(books, bookInfo)
 		}
 
 		return nil
@@ -92,6 +116,36 @@ func ListBooks(dir string) ([]string, error) {
 	}
 
 	return books, nil
+}
+
+// extractTags extracts folder names as tags from the book path
+func extractTags(bookPath, libraryRoot string) []string {
+	// Get relative path from library root
+	relPath, err := filepath.Rel(libraryRoot, bookPath)
+	if err != nil {
+		return []string{}
+	}
+
+	// Split path into components
+	dir := filepath.Dir(relPath)
+
+	// If file is directly in library root, no tags
+	if dir == "." {
+		return []string{}
+	}
+
+	// Split directory path into folder names
+	parts := strings.Split(dir, string(filepath.Separator))
+
+	// Filter out empty parts
+	tags := []string{}
+	for _, part := range parts {
+		if part != "" && part != "." {
+			tags = append(tags, part)
+		}
+	}
+
+	return tags
 }
 
 // GetChapter returns a specific chapter

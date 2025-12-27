@@ -143,7 +143,7 @@ func (m *ReaderModel) Init() tea.Cmd {
 // SaveProgress saves the current reading position
 func (m *ReaderModel) SaveProgress() {
 	if m.book != nil {
-		m.progress.SetBookProgress(m.book.Path, m.currentChapter, m.viewport.YOffset)
+		m.progress.SetBookProgress(m.book.Path, m.currentChapter, m.viewport.YOffset, m.book.ChapterCount())
 		config.SaveProgress(m.config, m.progress)
 	}
 }
